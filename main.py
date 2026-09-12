@@ -33,7 +33,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 # ==========================================================
 #                     SOZLAMALAR
 # ==========================================================
-BOT_TOKEN = os.getenv("8900883404:AAGDtSL3RgCv805wWyFcwdiu60ZlyNVaDp8", "")  # Render Environment: BOT_TOKEN
+BOT_TOKEN = os.getenv("8900883404:AAGAR0Ak2m-NNE0xBcka-RL6s4mhEqvBivs", "")  # Render Environment: BOT_TOKEN
 ADMIN_ID = int(os.getenv("8252424738", "0"))  # Render Environment: ADMIN_ID
 
 DB_PATH = "bot.db"
