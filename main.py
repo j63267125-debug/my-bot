@@ -33,8 +33,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 # ==========================================================
 #                     SOZLAMALAR
 # ==========================================================
-BOT_TOKEN = os.getenv("8900883404:AAGAR0Ak2m-NNE0xBcka-RL6s4mhEqvBivs", "")  # Render Environment: BOT_TOKEN
-ADMIN_ID = int(os.getenv("8252424738", "0"))  # Render Environment: ADMIN_ID
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
 DB_PATH = "bot.db"
 INTERVAL_OPTIONS = [20, 30, 40, 50, 60, 90, 120, 180]   # daqiqa
