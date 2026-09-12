@@ -27,6 +27,9 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.date import DateTrigger
 from apscheduler.triggers.cron import CronTrigger
 
+from aiohttp import web
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+
 # ==========================================================
 #                     SOZLAMALAR
 # ==========================================================
@@ -679,16 +682,42 @@ async def adm_users(c: CallbackQuery):
 
 
 # ==========================================================
-#                        RUN
+#                        RUN (webhook — bepul Web Service uchun)
 # ==========================================================
-async def main():
+PORT = int(os.getenv("PORT", "10000"))
+# Render avtomatik beradi, masalan: https://my-bot.onrender.com
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL", os.getenv("BASE_URL", ""))
+WEBHOOK_PATH = "/webhook"
+
+
+async def health(request):
+    # cron-job.org shu manzilni ping qilib botni uxlatmaydi
+    return web.Response(text="ok")
+
+
+async def on_startup(app):
     init_db()
     for r in all_active_reminders():
         schedule_reminder(r)
     scheduler.start()
+    if BASE_URL:
+        await bot.set_webhook(BASE_URL.rstrip("/") + WEBHOOK_PATH,
+                              drop_pending_updates=True)
+        print("Webhook o'rnatildi:", BASE_URL.rstrip("/") + WEBHOOK_PATH)
+    else:
+        print("DIQQAT: BASE_URL/RENDER_EXTERNAL_URL yo'q — webhook o'rnatilmadi.")
     print("Bot ishga tushdi.")
-    await dp.start_polling(bot)
+
+
+def build_app():
+    app = web.Application()
+    app.router.add_get("/", health)
+    app.router.add_get("/health", health)
+    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
+    setup_application(app, dp, bot=bot)
+    app.on_startup.append(on_startup)
+    return app
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    web.run_app(build_app(), host="0.0.0.0", port=PORT)
