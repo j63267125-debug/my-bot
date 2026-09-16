@@ -33,8 +33,8 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 # ==========================================================
 #                     SOZLAMALAR
 # ==========================================================
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")  # Render Environment: BOT_TOKEN
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Render Environment: ADMIN_ID
 
 DB_PATH = "bot.db"
 INTERVAL_OPTIONS = [20, 30, 40, 50, 60, 90, 120, 180]   # daqiqa
@@ -242,6 +242,7 @@ def reminder_actions(rid, active):
 
 def admin_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✉️ Bitta odamga yozish", callback_data="adm:dm")],
         [InlineKeyboardButton(text="📊 Statistika", callback_data="adm:stats")],
         [InlineKeyboardButton(text="🆕 Yangi murojaatlar", callback_data="adm:support_new")],
         [InlineKeyboardButton(text="📨 Barcha murojaatlar", callback_data="adm:support_all")],
@@ -352,6 +353,8 @@ class Quiet(StatesGroup):
 
 class AdminReply(StatesGroup):
     waiting = State()
+    dm_id = State()
+    dm_msg = State()
 
 
 @dp.message(CommandStart())
@@ -626,8 +629,23 @@ async def reply_send(m: Message, state: FSMContext):
     await state.clear()
     if not s:
         return await m.answer("Murojaat topilmadi.")
+    uid = s["user_id"]
+    cap = "📩 Admin javobi:"
     try:
-        await bot.send_message(s["user_id"], f"📩 Admin javobi:\n\n{m.text}")
+        if m.photo:
+            await bot.send_photo(uid, m.photo[-1].file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.voice:
+            await bot.send_voice(uid, m.voice.file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.video:
+            await bot.send_video(uid, m.video.file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.document:
+            await bot.send_document(uid, m.document.file_id,
+                                    caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        else:
+            await bot.send_message(uid, f"{cap}\n\n{m.text}")
         set_support_answered(sid)
         await m.answer("✅ Javob yuborildi.")
     except Exception as ex:
@@ -640,6 +658,58 @@ async def admin(m: Message):
     if m.from_user.id != ADMIN_ID:
         return
     await m.answer("Admin panel:", reply_markup=admin_menu())
+
+
+# ---- admin: bitta odamga yozish ----
+@dp.callback_query(F.data == "adm:dm")
+async def dm_start(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        return await c.answer("Ruxsat yo'q", show_alert=True)
+    await state.set_state(AdminReply.dm_id)
+    await c.message.answer("Kimga yozamiz? Foydalanuvchi ID sini yuboring.\n"
+                           "(👥 Foydalanuvchilar ro'yxatidan ID ni ko'rishingiz mumkin.)")
+    await c.answer()
+
+
+@dp.message(AdminReply.dm_id, F.text)
+async def dm_get_id(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    try:
+        uid = int(m.text.strip())
+    except ValueError:
+        return await m.answer("ID faqat raqam bo'ladi. Qaytadan yuboring.")
+    await state.update_data(dm_uid=uid)
+    await state.set_state(AdminReply.dm_msg)
+    await m.answer(f"#{uid} ga xabaringizni yuboring (matn, rasm, ovoz yoki fayl).")
+
+
+@dp.message(AdminReply.dm_msg)
+async def dm_send(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    uid = (await state.get_data())["dm_uid"]
+    await state.clear()
+    cap = "📩 Admin xabari:"
+    try:
+        if m.photo:
+            await bot.send_photo(uid, m.photo[-1].file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.voice:
+            await bot.send_voice(uid, m.voice.file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.video:
+            await bot.send_video(uid, m.video.file_id,
+                                 caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        elif m.document:
+            await bot.send_document(uid, m.document.file_id,
+                                    caption=cap + (f"\n\n{m.caption}" if m.caption else ""))
+        else:
+            await bot.send_message(uid, f"{cap}\n\n{m.text}")
+        await m.answer("✅ Yuborildi.", reply_markup=main_menu(m.from_user.id))
+    except Exception as ex:
+        await m.answer(f"Yuborilmadi: {ex}\n(Foydalanuvchi botga /start bosмаган bo'lishi mumkin.)",
+                       reply_markup=main_menu(m.from_user.id))
 
 
 @dp.callback_query(F.data == "adm:stats")
