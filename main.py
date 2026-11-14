@@ -854,6 +854,28 @@ async def cmd_widget(m: Message):
     await m.answer("✨ Interaktiv kartalar yoqildi.", reply_markup=main_menu(m.from_user.id))
 
 
+@dp.message(Command("test"))
+async def cmd_test(m: Message, state: FSMContext):
+    """Widget nega yuborilmayotganini chatning o'zida ko'rsatadi."""
+    await state.clear()
+    uid = m.from_user.id
+    tests = [
+        ("1-oddiy", "<b>Salom</b>", None, False),
+        ("2-holat", "<b>Salom</b>", {"a": 1}, False),
+        ("3-so'rov", "<b>Salom</b>", None, True),
+        ("4-karta", W_BUILDER, {"t": now().date().isoformat(), "x": "test"}, True),
+    ]
+    lines = []
+    for name, html, data, q in tests:
+        try:
+            await tg("sendWidget", chat_id=uid, html=html, caption=f"test {name}",
+                     chat_data=jd(data) if data is not None else None, allow_queries=q or None)
+            lines.append(f"✅ {name}")
+        except Exception as ex:
+            lines.append(f"❌ {name}: {ex}")
+    await m.answer("\n".join(lines))
+
+
 @dp.callback_query(F.data == "classic")
 async def cb_classic(c: CallbackQuery, state: FSMContext):
     await state.clear()
