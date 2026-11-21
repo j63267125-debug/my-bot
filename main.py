@@ -17,6 +17,7 @@ import random
 import asyncio
 import logging
 import sqlite3
+import calendar
 import datetime as dt
 from zoneinfo import ZoneInfo
 
@@ -67,6 +68,7 @@ DEFAULT_SETTINGS = {
     "p_fine": "-15",
     "discount": "100000",
     "award_hour": "23",
+    "rent_hour": "9",
 }
 
 SETTING_INFO = {
@@ -83,6 +85,7 @@ SETTING_INFO = {
     "p_fine": "Jarima yozilsa",
     "discount": "Oy g'olibiga chegirma (so'm)",
     "award_hour": "Oyning 1-kuni g'olib aniqlanadigan soat",
+    "rent_hour": "Ijara eslatmalari yuboriladigan soat",
 }
 
 DEFAULT_QUOTES = [
@@ -215,7 +218,16 @@ def init_db():
         CREATE TABLE IF NOT EXISTS support(
             id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, created_at TEXT);
         CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS rent_payments(
+            user_id INTEGER, period TEXT, amount INTEGER, paid_at TEXT,
+            PRIMARY KEY(user_id, period));
     """)
+    for table, col, typ in [("users", "pay_day", "INTEGER"), ("users", "rent", "INTEGER"),
+                            ("users", "rent_since", "TEXT"), ("awards", "applied_period", "TEXT")]:
+        try:
+            c.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+        except sqlite3.OperationalError:
+            pass
     for k, v in DEFAULT_SETTINGS.items():
         c.execute("INSERT OR IGNORE INTO settings VALUES(?,?)", (k, v))
     if c.execute("SELECT COUNT(*) FROM quotes").fetchone()[0] == 0:
@@ -326,6 +338,58 @@ def ranking(month):
     rows = [(u, pts.get(u) or 0, fn.get(u, 0), lk.get(u, 0)) for u in users]
     rows.sort(key=lambda r: (-r[1], r[2], -r[3]))
     return rows
+
+
+# ---- ijara ----
+def month_due(y, m, day):
+    return dt.date(y, m, min(day, calendar.monthrange(y, m)[1]))
+
+
+def rent_periods(u):
+    """[(davr, sana)] — o'tgan, shu va keyingi oy; kuzatuv boshlangandan keyingilari."""
+    if not u["pay_day"] or not u["rent"]:
+        return []
+    d = today()
+    first = d.replace(day=1)
+    prev = first - dt.timedelta(days=1)
+    nxt = (first + dt.timedelta(days=32)).replace(day=1)
+    since = u["rent_since"] or iso(d)
+    out = []
+    for x in (prev, d, nxt):
+        due = month_due(x.year, x.month, u["pay_day"])
+        if iso(due) >= since:
+            out.append((f"{x.year}-{x.month:02d}", due))
+    return out
+
+
+def unpaid_periods(u):
+    return [(p, due) for p, due in rent_periods(u)
+            if not q1("SELECT 1 FROM rent_payments WHERE user_id=? AND period=?", (u["user_id"], p))]
+
+
+def rent_amount(uid, period):
+    u = get_user(uid)
+    disc = q1("SELECT COALESCE(SUM(amount),0) FROM awards WHERE user_id=? AND status='confirmed' "
+              "AND applied_period=?", (uid, period))[0]
+    return max(0, (u["rent"] or 0) - disc)
+
+
+def next_rent(u):
+    """Birinchi to'lanmagan davr (kechikkan bo'lsa ham)."""
+    up = unpaid_periods(u)
+    return up[0] if up else None
+
+
+def rent_text(uid, p, due, when):
+    amt = rent_amount(uid, p)
+    disc = (get_user(uid)["rent"] or 0) - amt
+    t = f"🏠 Ijara to'lovi\n📅 Sana: {due:%d.%m.%Y} ({when})\n💵 Summa: {fmt(amt)} so'm"
+    if disc > 0:
+        t += f"\n🏆 Chegirma hisobga olindi: −{fmt(disc)} so'm"
+    debt = q1("SELECT COALESCE(SUM(amount),0) FROM fines WHERE user_id=? AND paid=0", (uid,))[0]
+    if debt:
+        t += f"\n💸 To'lanmagan jarima: {fmt(debt)} so'm"
+    return t
 
 
 # ==========================================================
@@ -623,6 +687,31 @@ async def monthly_award():
                reply_markup=ikb([[("✅ Tasdiqlash", f"aw:{month}"), ("❌ Bekor", f"an:{month}")]]))
 
 
+async def rent_check():
+    """3 va 1 kun qolganda, to'lov kuni va kechikkan har kuni eslatadi."""
+    d = today()
+    lines, rows = [], []
+    for u in q("SELECT * FROM users WHERE status='active' AND pay_day IS NOT NULL AND rent>0"):
+        uid = u["user_id"]
+        for p, due in unpaid_periods(u):
+            left = (due - d).days
+            if left in (3, 1):
+                when = f"{left} kun qoldi"
+            elif left == 0:
+                when = "bugun"
+            elif left < 0:
+                when = f"{-left} kun kechikdi"
+            else:
+                continue
+            await send(uid, rent_text(uid, p, due, when))
+            if left <= 0:
+                lines.append(f"• {nm(uid)} — {fmt(rent_amount(uid, p))} so'm, {due:%d.%m} ({when})")
+                rows.append([(f"✅ {short(nm(uid), 18)} to'ladi ({due:%d.%m})", f"ry:{uid}:{p}")])
+    if lines:
+        await send(ADMIN_ID, "🏠 Bugungi va kechikkan ijara to'lovlari:\n\n" + "\n".join(lines),
+                   reply_markup=ikb(rows))
+
+
 async def close_due():
     lim = (now() - dt.timedelta(hours=sint("rate_hours"))).isoformat(timespec="seconds")
     for r in q("SELECT id FROM completions WHERE status='rating' AND created_at<=?", (lim,)):
@@ -649,6 +738,8 @@ async def tick():
             await tomorrow_warn()
         if d.day == 1 and h == sint("award_hour"):
             await monthly_award()
+        if h == sint("rent_hour"):
+            await rent_check()
     except Exception:
         log.exception("tick")
 
@@ -661,6 +752,7 @@ T_ME, T_SUPPLY, T_SUPPORT = "📊 Mening holatim", "🧴 Vosita tugadi", "✍️
 A_TASKS, A_USERS, A_SCHED = "🧹 Ishlar", "👥 Ijarachilar", "📅 Navbat"
 A_DEBT, A_PTS, A_QUOTES = "💰 Qarzlar", "➕ Ball", "💬 Gaplar"
 A_STATS, A_SET = "📊 Statistika", "⚙️ Sozlamalar"
+A_RENT, A_BC = "🏠 Ijara", "📢 Hammaga xabar"
 
 
 def kb(rows):
@@ -673,7 +765,8 @@ def tenant_kb():
 
 
 def admin_kb():
-    return kb([[A_TASKS, A_USERS, A_SCHED], [A_DEBT, T_RANK, A_PTS], [A_QUOTES, A_STATS, A_SET]])
+    return kb([[A_TASKS, A_USERS, A_SCHED], [A_DEBT, T_RANK, A_PTS], [A_RENT, A_BC],
+               [A_QUOTES, A_STATS, A_SET]])
 
 
 # ==========================================================
@@ -698,6 +791,8 @@ class Adm(StatesGroup):
     pts = State()
     add_quote = State()
     reply = State()
+    rent_set = State()
+    broadcast = State()
 
 
 # ==========================================================
@@ -800,8 +895,18 @@ async def m_me(m: Message, state: FSMContext):
     if nd:
         d = dt.date.fromisoformat(nd[0])
         nd_text = f"{WD[d.weekday()]} {d:%d.%m}" + (" (bugun)" if d == today() else "")
-    await m.answer(f"📊 {nm(uid)}\n\n🏆 {month_name(month)}: {pts} ball, {place}-o'rin\n"
-                   f"💸 To'lanmagan jarima: {fmt(debt)} so'm\n📅 Keyingi navbat: {nd_text}")
+    text = (f"📊 {nm(uid)}\n\n🏆 {month_name(month)}: {pts} ball, {place}-o'rin\n"
+            f"💸 To'lanmagan jarima: {fmt(debt)} so'm\n📅 Keyingi navbat: {nd_text}")
+    u = get_user(uid)
+    nr = next_rent(u)
+    if nr:
+        p, due = nr
+        text += f"\n🏠 Ijara: {due:%d.%m.%Y} — {fmt(rent_amount(uid, p))} so'm"
+        if due < today():
+            text += " ❗ kechikdi"
+    elif u["pay_day"]:
+        text += "\n🏠 Ijara: to'langan ✅"
+    await m.answer(text)
 
 
 @dp.message(F.text == T_SUPPLY)
@@ -950,6 +1055,46 @@ async def a_quotes(m: Message, state: FSMContext):
 async def a_stats(m: Message, state: FSMContext):
     await state.clear()
     await m.answer(stats_text()[:4000])
+
+
+def rent_view():
+    lines, rows = [], []
+    for u in q("SELECT * FROM users WHERE status='active' ORDER BY joined_at"):
+        uid = u["user_id"]
+        row = [(f"⚙️ {short(u['full_name'], 16)}", f"rs:{uid}")]
+        if not u["pay_day"] or not u["rent"]:
+            lines.append(f"• {u['full_name']} — kiritilmagan")
+        else:
+            line = f"• {u['full_name']} — har oy {u['pay_day']}-sana, {fmt(u['rent'])} so'm"
+            nr = next_rent(u)
+            if nr:
+                p, due = nr
+                line += f"\n   Keyingi: {due:%d.%m} — {fmt(rent_amount(uid, p))} so'm"
+                if due < today():
+                    line += " ❗ kechikdi"
+                row.append(("✅ To'ladi", f"ry:{uid}:{p}"))
+            else:
+                line += "\n   ✅ To'langan"
+            lines.append(line)
+        rows.append(row)
+    text = "🏠 Ijara ma'lumotlari\n\n" + ("\n".join(lines) or "Ijarachi yo'q.")
+    text += "\n\n⚙️ — sana va summani kiritish/o'zgartirish"
+    return text, (ikb(rows) if rows else None)
+
+
+@dp.message(IsAdmin, F.text == A_RENT)
+async def a_rent(m: Message, state: FSMContext):
+    await state.clear()
+    text, k = rent_view()
+    await m.answer(text, reply_markup=k)
+
+
+@dp.message(IsAdmin, F.text == A_BC)
+async def a_bc(m: Message, state: FSMContext):
+    await state.clear()
+    await state.set_state(Adm.broadcast)
+    await m.answer("Xabaringizni yozing (matn, rasm, ovoz yoki fayl). Barcha ijarachilarga yuboriladi.\n"
+                   "Bekor qilish: /start")
 
 
 @dp.message(IsAdmin, F.text == A_SET)
@@ -1445,7 +1590,14 @@ async def cb_award(c: CallbackQuery):
     if not a or a["status"] != "pending":
         return await c.answer("Allaqachon hal qilingan")
     if act == "aw":
-        run("UPDATE awards SET status='confirmed' WHERE month=?", (month,))
+        nr = next_rent(get_user(a["user_id"]))
+        nr = nr if nr and nr[1] >= today() else None
+        run("UPDATE awards SET status='confirmed', applied_period=? WHERE month=?",
+            (nr[0] if nr else None, month))
+        if nr:
+            await send(ADMIN_ID, f"🏠 Chegirma {nr[1]:%d.%m.%Y} dagi ijara to'loviga qo'shildi.")
+        else:
+            await send(ADMIN_ID, "⚠️ G'olibning ijara ma'lumoti kiritilmagan — chegirmani qo'lda hisobga oling.")
         await broadcast(f"🏆 {month_name(month)} oyining eng toza ijarachisi: {nm(a['user_id'])} — "
                         f"{a['points']} ball!\nUnga ijaradan {fmt(a['amount'])} so'm chegirma.\n\n"
                         f"Yangi oyda ballar 0 dan boshlandi. Omad!")
@@ -1454,6 +1606,77 @@ async def cb_award(c: CallbackQuery):
         run("UPDATE awards SET status='cancelled' WHERE month=?", (month,))
         await c.answer("Bekor qilindi")
     await safe_markup(c.message, None)
+
+
+# ==========================================================
+#                     ADMIN: IJARA VA HAMMAGA XABAR
+# ==========================================================
+@dp.callback_query(IsAdmin, F.data.startswith("rs:"))
+async def cb_rs(c: CallbackQuery, state: FSMContext):
+    uid = int(c.data.split(":")[1])
+    await state.set_state(Adm.rent_set)
+    await state.update_data(uid=uid)
+    await c.message.answer(f"{nm(uid)}: to'lov sanasi va summasini yozing.\n"
+                           f"Format: sana summa\nMasalan: 15 2000000\n"
+                           f"(sana — har oyning nechanchi kuni, 1–31)")
+    await c.answer()
+
+
+@dp.message(Adm.rent_set, IsAdmin)
+async def st_rent_set(m: Message, state: FSMContext):
+    try:
+        day_s, amt_s = (m.text or "").split(maxsplit=1)
+        day, amt = int(day_s), to_int(amt_s)
+        assert 1 <= day <= 31 and amt > 0
+    except Exception:
+        return await m.answer("Format noto'g'ri. Masalan: 15 2000000")
+    uid = (await state.get_data())["uid"]
+    await state.clear()
+    run("UPDATE users SET pay_day=?, rent=?, rent_since=COALESCE(rent_since, ?) WHERE user_id=?",
+        (day, amt, iso(today()), uid))
+    await send(uid, f"🏠 Ijara to'lovi: har oyning {day}-sanasi, {fmt(amt)} so'm.\n"
+                    f"3 kun va 1 kun oldin, hamda to'lov kuni eslataman.")
+    text, k = rent_view()
+    await m.answer("✅ Saqlandi.\n\n" + text, reply_markup=k)
+
+
+@dp.callback_query(IsAdmin, F.data.startswith("ry:"))
+async def cb_ry(c: CallbackQuery):
+    _, uid, p = c.data.split(":")
+    uid = int(uid)
+    amt = rent_amount(uid, p)
+    cur = run("INSERT OR IGNORE INTO rent_payments(user_id,period,amount,paid_at) VALUES(?,?,?,?)",
+              (uid, p, amt, ts()))
+    if cur.rowcount == 1:
+        await send(uid, f"✅ {month_name(p)} uchun ijara to'lovi ({fmt(amt)} so'm) qabul qilindi. Rahmat!")
+        await c.answer("Belgilandi")
+    else:
+        await c.answer("Allaqachon belgilangan")
+    if (c.message.text or "").startswith("🏠 Ijara ma'lumotlari"):
+        text, k = rent_view()
+        try:
+            await c.message.edit_text(text, reply_markup=k)
+        except Exception:
+            pass
+    elif c.message.reply_markup:
+        rows = [[(b.text, b.callback_data) for b in r] for r in c.message.reply_markup.inline_keyboard]
+        rows = [r for r in rows if all(d != c.data for _, d in r)]
+        await safe_markup(c.message, ikb(rows) if rows else None)
+
+
+@dp.message(Adm.broadcast, IsAdmin)
+async def st_broadcast(m: Message, state: FSMContext):
+    await state.clear()
+    ok = 0
+    for uid in active_ids():
+        try:
+            await bot.send_message(uid, "📢 Uy egasidan:")
+            await bot.copy_message(uid, m.chat.id, m.message_id)
+            ok += 1
+        except Exception as e:
+            log.warning("broadcast %s: %s", uid, e)
+        await asyncio.sleep(0.05)
+    await m.answer(f"✅ {ok} ta ijarachiga yuborildi.", reply_markup=admin_kb())
 
 
 # ==========================================================
