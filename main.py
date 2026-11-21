@@ -1685,12 +1685,15 @@ async def st_broadcast(m: Message, state: FSMContext):
 @dp.message(Supply.waiting)
 async def st_supply(m: Message, state: FSMContext):
     await state.clear()
-    await send(ADMIN_ID, f"🧴 {nm(m.from_user.id)}: tugadi 👇")
-    try:
-        await bot.copy_message(ADMIN_ID, m.chat.id, m.message_id)
-    except Exception as e:
-        log.warning("supply copy: %s", e)
-    await m.answer("✅ Uy egasiga yetkazildi.", reply_markup=tenant_kb())
+    uid = m.from_user.id
+    for to in [u for u in active_ids() if u != uid] + [ADMIN_ID]:
+        try:
+            await bot.send_message(to, f"🧴 {nm(uid)}: tugadi 👇")
+            await bot.copy_message(to, m.chat.id, m.message_id)
+        except Exception as e:
+            log.warning("supply %s: %s", to, e)
+        await asyncio.sleep(0.05)
+    await m.answer("✅ Hammaga va uy egasiga yetkazildi.", reply_markup=tenant_kb())
 
 
 @dp.message(Support.waiting)
